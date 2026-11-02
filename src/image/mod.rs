@@ -237,6 +237,7 @@ fn xterm_256_to_rgb(i: u8) -> (u8, u8, u8) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn test_picker_query_timeout_is_fast() {
         let options = query_options();

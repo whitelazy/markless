@@ -450,37 +450,14 @@ fn process_node<'a, S: BuildHasher>(
                 }
             } else {
                 for (alt, src) in child_images {
-                    let height_lines = ctx.image_heights.get(&src).copied().unwrap_or(1).max(1);
-                    let has_caption = ctx.image_heights.contains_key(&src) && !alt.is_empty();
-                    let start_line = ctx.lines.len();
-                    let label = format!("[Image: {}]", if alt.is_empty() { &src } else { &alt });
-
-                    if has_caption {
-                        ctx.lines
-                            .push(RenderedLine::new(format!("    {alt}"), LineType::Image));
-                    }
-
-                    // First line shows the image placeholder/alt text
-                    ctx.lines
-                        .push(RenderedLine::new(label.clone(), LineType::Image));
-                    ctx.link_refs.push(LinkRef {
-                        text: label,
-                        url: src.clone(),
-                        line: start_line + usize::from(has_caption),
-                    });
-
-                    // Reserve additional lines for image content (empty Image lines)
-                    for _ in 1..height_lines {
-                        ctx.lines
-                            .push(RenderedLine::new(String::new(), LineType::Image));
-                    }
-
-                    let end_line = ctx.lines.len();
-                    ctx.images.push(ImageRef {
-                        alt: alt.clone(),
-                        src: src.clone(),
-                        line_range: start_line + usize::from(has_caption)..end_line,
-                    });
+                    emit_image_block(
+                        &mut ctx.lines,
+                        &mut ctx.link_refs,
+                        &mut ctx.images,
+                        ctx.image_heights,
+                        &alt,
+                        &src,
+                    );
                 }
             }
             ctx.lines
@@ -702,12 +679,28 @@ fn process_node<'a, S: BuildHasher>(
                         } else {
                             &prefix_first
                         };
-                        if ctx.no_inline_math && ctx.math_as_images && has_inline_math(child) {
+                        let child_images = collect_paragraph_images(child);
+                        if !child_images.is_empty() && is_image_only_paragraph(child) {
+                            for (alt, src) in &child_images {
+                                emit_image_block(
+                                    &mut ctx.lines,
+                                    &mut ctx.link_refs,
+                                    &mut ctx.images,
+                                    ctx.image_heights,
+                                    alt,
+                                    src,
+                                );
+                            }
+                        } else if ctx.no_inline_math && ctx.math_as_images && has_inline_math(child)
+                        {
                             emit_paragraph_with_no_inline_math(child, ctx, prefix, &prefix_next);
                         } else {
                             let spans = collect_inline_spans(child);
                             let link_start = ctx.link_refs.len();
+                            let images_start = ctx.images.len();
                             collect_inline_elements(child, 0, &mut ctx.images, &mut ctx.link_refs);
+                            // Images are placed by `emit_image_block` below, not at line 0.
+                            ctx.images.truncate(images_start);
                             let base_line = ctx.lines.len();
                             let wrapped = wrap_spans(&spans, ctx.wrap_width, prefix, &prefix_next);
 
@@ -726,6 +719,16 @@ fn process_node<'a, S: BuildHasher>(
                                 prefix_next.len(),
                             );
                             ctx.link_refs.extend(extra);
+                            for (alt, src) in &child_images {
+                                emit_image_block(
+                                    &mut ctx.lines,
+                                    &mut ctx.link_refs,
+                                    &mut ctx.images,
+                                    ctx.image_heights,
+                                    alt,
+                                    src,
+                                );
+                            }
                         }
                         rendered_any = true;
                         rendered_paragraphs += 1;
@@ -766,6 +769,7 @@ fn process_node<'a, S: BuildHasher>(
                 &mut ctx.lines,
                 &mut ctx.link_refs,
                 &mut ctx.images,
+                ctx.image_heights,
                 ctx.wrap_width,
                 1,
             );
@@ -1254,11 +1258,12 @@ fn ensure_trailing_empty_lines(lines: &mut Vec<RenderedLine>, count: usize) {
     }
 }
 
-fn render_blockquote<'a>(
+fn render_blockquote<'a, S: BuildHasher>(
     node: &'a AstNode<'a>,
     lines: &mut Vec<RenderedLine>,
     link_refs: &mut Vec<LinkRef>,
     images: &mut Vec<ImageRef>,
+    image_heights: &HashMap<String, usize, S>,
     wrap_width: usize,
     quote_depth: usize,
 ) {
@@ -1267,9 +1272,19 @@ fn render_blockquote<'a>(
     for child in node.children() {
         match &child.data.borrow().value {
             NodeValue::Paragraph => {
+                let child_images = collect_paragraph_images(child);
+                if !child_images.is_empty() && is_image_only_paragraph(child) {
+                    for (alt, src) in &child_images {
+                        emit_image_block(lines, link_refs, images, image_heights, alt, src);
+                    }
+                    continue;
+                }
                 let spans = collect_inline_spans(child);
                 let link_start = link_refs.len();
+                let images_start = images.len();
                 collect_inline_elements(child, 0, images, link_refs);
+                // Images are placed by `emit_image_block` below, not at line 0.
+                images.truncate(images_start);
                 let base_line = lines.len();
                 let wrapped = wrap_spans(&spans, wrap_width, &prefix, &prefix);
                 for line_spans in wrapped {
@@ -1287,9 +1302,20 @@ fn render_blockquote<'a>(
                     prefix.len(),
                 );
                 link_refs.extend(extra);
+                for (alt, src) in &child_images {
+                    emit_image_block(lines, link_refs, images, image_heights, alt, src);
+                }
             }
             NodeValue::BlockQuote => {
-                render_blockquote(child, lines, link_refs, images, wrap_width, quote_depth + 1);
+                render_blockquote(
+                    child,
+                    lines,
+                    link_refs,
+                    images,
+                    image_heights,
+                    wrap_width,
+                    quote_depth + 1,
+                );
             }
             _ => {
                 let link_start = link_refs.len();
@@ -1431,7 +1457,11 @@ fn collect_table_rows<'a>(
             let text = spans_to_string(&spans);
             // Collect links from this cell; line will be fixed up later
             let link_start = link_refs.len();
+            // A table row is a single line, so a cell image has no rows to
+            // reserve; keep its alt text only instead of registering it at line 0.
+            let images_start = images.len();
             collect_inline_elements(cell_node, 0, images, link_refs);
+            images.truncate(images_start);
             for idx in link_start..link_refs.len() {
                 this_row_link_indices.push(idx);
             }
@@ -2064,6 +2094,58 @@ fn truncate_spans(spans: &[InlineSpan], max_len: usize) -> Vec<InlineSpan> {
 }
 
 /// Collect images from a paragraph node, returning (alt, src) pairs.
+/// Emit an image placeholder block: optional caption, label line, and the
+/// extra `Image` lines reserving the image's rendered height. Registers the
+/// matching `ImageRef` so the renderer knows where to draw it.
+fn emit_image_block<S: BuildHasher>(
+    lines: &mut Vec<RenderedLine>,
+    link_refs: &mut Vec<LinkRef>,
+    images: &mut Vec<ImageRef>,
+    image_heights: &HashMap<String, usize, S>,
+    alt: &str,
+    src: &str,
+) {
+    let height_lines = image_heights.get(src).copied().unwrap_or(1).max(1);
+    let has_caption = image_heights.contains_key(src) && !alt.is_empty();
+    let start_line = lines.len();
+    let label = format!("[Image: {}]", if alt.is_empty() { src } else { alt });
+
+    if has_caption {
+        lines.push(RenderedLine::new(format!("    {alt}"), LineType::Image));
+    }
+
+    // First line shows the image placeholder/alt text
+    lines.push(RenderedLine::new(label.clone(), LineType::Image));
+    link_refs.push(LinkRef {
+        text: label,
+        url: src.to_string(),
+        line: start_line + usize::from(has_caption),
+    });
+
+    // Reserve additional lines for image content (empty Image lines)
+    for _ in 1..height_lines {
+        lines.push(RenderedLine::new(String::new(), LineType::Image));
+    }
+
+    let end_line = lines.len();
+    images.push(ImageRef {
+        alt: alt.to_string(),
+        src: src.to_string(),
+        line_range: start_line + usize::from(has_caption)..end_line,
+    });
+}
+
+/// True when a paragraph holds only images (plus line breaks), so its text
+/// form would just repeat the image's alt text.
+fn is_image_only_paragraph<'a>(node: &'a AstNode<'a>) -> bool {
+    node.children().all(|c| {
+        matches!(
+            c.data.borrow().value,
+            NodeValue::Image(_) | NodeValue::SoftBreak | NodeValue::LineBreak
+        )
+    })
+}
+
 fn collect_paragraph_images<'a>(node: &'a AstNode<'a>) -> Vec<(String, String)> {
     let mut images = Vec::new();
     collect_paragraph_images_recursive(node, &mut images);
@@ -4258,6 +4340,103 @@ mod tests {
         assert!(
             has_x,
             "inline math $x$ before display math should be visible"
+        );
+    }
+
+    /// Asserts every image ref points at a block of `Image` lines of `height` rows.
+    fn assert_images_reserve_lines(doc: &Document, count: usize, height: usize) {
+        assert_eq!(doc.images().len(), count, "image ref count");
+        for img in doc.images() {
+            assert_eq!(
+                img.line_range.len(),
+                height,
+                "image {} should span {height} lines, got {:?}",
+                img.src,
+                img.line_range
+            );
+            for i in img.line_range.clone() {
+                let line = doc.line_at(i).expect("image line exists");
+                assert_eq!(
+                    *line.line_type(),
+                    LineType::Image,
+                    "line {i} of {} should be an Image line",
+                    img.src
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_image_in_ordered_list_item_reserves_lines() {
+        let heights = HashMap::from([("x.png".to_string(), 5usize)]);
+        let md = "1. one
+
+   ![a](x.png)
+
+2. two
+";
+        let doc = Document::parse_with_image_heights(md, &heights).unwrap();
+        assert_images_reserve_lines(&doc, 1, 5);
+        assert!(doc.images()[0].line_range.start > 0);
+    }
+
+    #[test]
+    fn test_image_in_bullet_list_item_reserves_lines() {
+        let heights = HashMap::from([("x.png".to_string(), 4usize)]);
+        let md = "- one
+
+  ![a](x.png)
+";
+        let doc = Document::parse_with_image_heights(md, &heights).unwrap();
+        assert_images_reserve_lines(&doc, 1, 4);
+    }
+
+    #[test]
+    fn test_images_in_list_get_distinct_ranges_and_keep_text() {
+        let heights = HashMap::from([("x.png".to_string(), 3usize), ("y.png".to_string(), 3usize)]);
+        let md = "1. first
+
+   ![a](x.png)
+
+2. second
+
+   ![b](y.png)
+";
+        let doc = Document::parse_with_image_heights(md, &heights).unwrap();
+        assert_images_reserve_lines(&doc, 2, 3);
+        let (a, b) = (&doc.images()[0], &doc.images()[1]);
+        assert!(a.line_range.end <= b.line_range.start, "ranges overlap");
+        let text: String = (0..doc.line_count())
+            .filter_map(|i| doc.line_at(i))
+            .map(|l| l.content().to_string())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(text.contains("first") && text.contains("second"));
+    }
+
+    #[test]
+    fn test_image_in_blockquote_reserves_lines() {
+        let heights = HashMap::from([("x.png".to_string(), 5usize)]);
+        let md = "> ![a](x.png)
+";
+        let doc = Document::parse_with_image_heights(md, &heights).unwrap();
+        assert_images_reserve_lines(&doc, 1, 5);
+    }
+
+    #[test]
+    fn test_image_in_table_cell_is_not_registered_at_line_zero() {
+        let md = "| a |
+|---|
+| ![a](x.png) |
+";
+        let doc = Document::parse(md).unwrap();
+        assert!(
+            doc.images().is_empty(),
+            "table cell images cannot reserve rows; got {:?}",
+            doc.images()
         );
     }
 }
