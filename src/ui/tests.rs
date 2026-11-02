@@ -1244,3 +1244,87 @@ fn test_editor_renders_tab_mid_line_to_tab_stop() {
         "Tab mid-line should expand to next tab stop, got: '{first_row}'"
     );
 }
+
+// ==================== SIXEL CLIPPING ====================
+
+/// Rows a sixel payload occupies: bands of 6 pixel rows, each ended by `-`.
+fn sixel_rows(data: &str, cell_h: u32) -> Option<u16> {
+    let sixel = &data[data.find("P")?..];
+    let bands = u32::try_from(sixel.matches('-').count()).ok()?;
+    u16::try_from((bands * 6).div_ceil(cell_h)).ok()
+}
+
+/// (x, y, rows) of every sixel payload cell in the buffer.
+fn sixel_cells(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16, u16)> {
+    let mut out = Vec::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let sym = buffer[(x, y)].symbol();
+            if sym.contains("P") {
+                out.push((x, y, sixel_rows(sym, 20).unwrap_or(0)));
+            }
+        }
+    }
+    out
+}
+
+fn sixel_model(height: u16, scroll: usize) -> Option<Model> {
+    let fixture_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/test_image.png");
+    if !fixture_path.exists() {
+        return None;
+    }
+    let mut md = format!("Line 1\n\n![Test]({})\n\n", fixture_path.display());
+    for i in 0..50 {
+        md.push_str(&format!("Content line {i}\n\n"));
+    }
+    let doc = Document::parse(&md).unwrap();
+    let mut picker = Picker::halfblocks();
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+    let mut model = Model::new(PathBuf::from("test.md"), doc, (80, height));
+    model.picker = Some(picker);
+    model.load_nearby_images();
+    let total = model.document.line_count();
+    model.viewport.set_total_lines(total);
+    model.viewport.scroll_down(scroll);
+    Some(model)
+}
+
+#[test]
+fn test_sixel_image_clipped_at_bottom_does_not_overflow_viewport() {
+    let Some(mut model) = sixel_model(12, 0) else {
+        return;
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+    terminal.draw(|frame| render(&mut model, frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let cells = sixel_cells(buffer);
+    assert!(!cells.is_empty(), "visible image part should be drawn");
+    for (_, y, rows) in cells {
+        assert!(
+            y + rows <= buffer.area.height,
+            "sixel at row {y} spans {rows} rows, past viewport height {}",
+            buffer.area.height
+        );
+    }
+}
+
+#[test]
+fn test_sixel_image_clipped_at_top_is_still_drawn() {
+    let Some(mut model) = sixel_model(40, 10) else {
+        return;
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    terminal.draw(|frame| render(&mut model, frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let cells = sixel_cells(buffer);
+    assert!(
+        !cells.is_empty(),
+        "bottom part of an image scrolled off the top should still be drawn"
+    );
+    for (_, y, rows) in cells {
+        assert!(y + rows <= buffer.area.height);
+    }
+}

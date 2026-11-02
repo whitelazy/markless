@@ -94,8 +94,10 @@ pub fn render_images(model: &mut Model, frame: &mut Frame, doc_area: Rect) {
             }
         }
 
-        if matches!(protocol.protocol_type(), StatefulProtocolType::ITerm2(_)) {
-            if image_scroll_settling {
+        let is_iterm2 = matches!(protocol.protocol_type(), StatefulProtocolType::ITerm2(_));
+        let is_sixel = matches!(protocol.protocol_type(), StatefulProtocolType::Sixel(_));
+        if is_iterm2 || is_sixel {
+            if is_iterm2 && image_scroll_settling {
                 // iTerm2/Warp can flicker when re-embedding inline images during rapid scroll.
                 // Draw a cheap gray placeholder while scrolling; restore image on settle.
                 let frame_buf = frame.buffer_mut();
@@ -123,8 +125,9 @@ pub fn render_images(model: &mut Model, frame: &mut Frame, doc_area: Rect) {
                 continue;
             }
 
-            // iTerm2 inline graphics store the payload in a single anchor cell; row-slicing the
-            // rendered buffer breaks scrolling and causes stale/overwritten content.
+            // iTerm2 and Sixel graphics store the whole payload in a single anchor cell; row-slicing
+            // the rendered buffer either drops the payload (top clipped) or lets it draw past the
+            // viewport (bottom clipped). Crop re-encodes just the visible part instead.
             let crop = if src_start > 0 {
                 Resize::Crop(Some(CropOptions {
                     clip_top: true,
@@ -142,7 +145,7 @@ pub fn render_images(model: &mut Model, frame: &mut Frame, doc_area: Rect) {
             crate::perf::log_event(
                 "render.image.direct",
                 format!(
-                    "src={} y={} rows={} cols={} src_start={} mode=iterm2-crop",
+                    "src={} y={} rows={} cols={} src_start={} mode=crop",
                     img_ref.src, dst_y, visible_rows, visible_cols, src_start
                 ),
             );
