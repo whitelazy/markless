@@ -4108,3 +4108,15 @@ fn test_file_changed_keeps_failed_remote_image_placeholder() {
     assert!(model.take_remote_image_requests().is_empty());
     assert!(has_line(&model, "[Image failed: Tux]"));
 }
+
+#[test]
+fn test_deliver_remote_image_failure_for_other_file_leaves_plain_text_unparsed() {
+    // A late failure from a previously viewed file must not reparse the
+    // current plain-text document as markdown.
+    let doc = Document::from_plain_text("**not bold**");
+    let mut model = Model::new(PathBuf::from("notes.txt"), doc, (80, 24));
+
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    assert!(has_line(&model, "**not bold**"));
+}

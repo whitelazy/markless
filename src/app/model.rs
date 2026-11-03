@@ -325,8 +325,12 @@ impl Model {
                         crate::image::remote::failure_reason(&e)
                     ),
                 );
+                // A late result may belong to a file viewed earlier; only redraw ours.
+                let in_document = self.document.images().iter().any(|i| i.src == src);
                 self.failed_remote_images.insert(src);
-                self.reparse_document();
+                if in_document {
+                    self.reflow_layout();
+                }
             }
         }
     }
