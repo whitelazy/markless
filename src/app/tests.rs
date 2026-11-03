@@ -4149,3 +4149,33 @@ fn test_deliver_remote_image_failure_for_other_file_leaves_plain_text_unparsed()
 
     assert!(has_line(&model, "**not bold**"));
 }
+
+fn test_load_nearby_images_small_local_image_not_upscaled() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbaImage::new(20, 10)
+        .save(dir.path().join("small.png"))
+        .unwrap();
+    image::RgbaImage::new(4000, 100)
+        .save(dir.path().join("big.png"))
+        .unwrap();
+    let md = "![small](small.png)\n\n![big](big.png)\n";
+    let doc = Document::parse_with_layout(md, 80).unwrap();
+    let picker = ratatui_image::picker::Picker::halfblocks();
+    let font_w = u32::from(picker.font_size().0);
+    let mut model = Model::new(dir.path().join("doc.md"), doc, (80, 24)).with_picker(Some(picker));
+
+    model.load_nearby_images();
+
+    let target_cols = (80.0_f32 * 0.65) as u16;
+    let small_cols = model.image_protocols.get("small.png").unwrap().1;
+    let big_cols = model.image_protocols.get("big.png").unwrap().1;
+    assert_eq!(
+        u32::from(small_cols),
+        (20 / font_w).max(1),
+        "small image keeps its own width"
+    );
+    assert_eq!(
+        big_cols, target_cols,
+        "large image still shrinks to the target width"
+    );
+}

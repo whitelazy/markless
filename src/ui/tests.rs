@@ -134,7 +134,10 @@ fn test_load_nearby_images_uses_protocol_render_height() {
         .get(image_path.to_str().unwrap())
         .expect("protocol missing");
     let target_width_cols = (model.viewport.width() as f32 * 0.65) as u16;
-    let area = ratatui::layout::Rect::new(0, 0, target_width_cols, u16::MAX);
+    // Images are never upscaled: the render area is the image's own width.
+    let font_w = u32::from(model.picker.as_ref().unwrap().font_size().0);
+    let own_cols = ((120 / font_w).max(1) as u16).min(target_width_cols);
+    let area = ratatui::layout::Rect::new(0, 0, own_cols, u16::MAX);
     let expected = protocol.size_for(
         Resize::Scale(Some(image::imageops::FilterType::CatmullRom)),
         area,
@@ -1312,9 +1315,13 @@ fn test_sixel_image_clipped_at_bottom_does_not_overflow_viewport() {
 
 #[test]
 fn test_sixel_image_clipped_at_top_is_still_drawn() {
-    let Some(mut model) = sixel_model(40, 10) else {
+    let Some(mut model) = sixel_model(40, 0) else {
         return;
     };
+    // Scroll just past the image's first row so only its top is clipped.
+    let range = model.document.images()[0].line_range.clone();
+    assert!(range.len() > 1, "image must span several rows: {range:?}");
+    model.viewport.scroll_down(range.start + 1);
     let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
     terminal.draw(|frame| render(&mut model, frame)).unwrap();
     let buffer = terminal.backend().buffer();
