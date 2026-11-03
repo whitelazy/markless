@@ -309,7 +309,7 @@ impl App {
         let (remote_tx, remote_rx) = Self::spawn_remote_image_fetchers(|url| {
             crate::image::remote::fetch_remote_image(
                 url,
-                crate::image::remote::REMOTE_IMAGE_TIMEOUT,
+                crate::image::remote::REMOTE_IMAGE_TIMEOUTS,
             )
         });
 

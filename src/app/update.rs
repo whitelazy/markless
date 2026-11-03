@@ -319,13 +319,15 @@ pub fn update(mut model: Model, msg: Message) -> Model {
         Message::HelpScrollUp(n) => {
             model.help_scroll_offset = model.help_scroll_offset.saturating_sub(n);
         }
+        // The reload itself is a side effect (effects.rs); a user reload also
+        // retries failed remote images.
+        Message::ForceReload => model.forget_failed_remote_images(),
         // TocCollapse/TocExpand: handled in effects (browse mode navigation)
-        // FileChanged/ForceReload: handled in event loop (side effect)
+        // FileChanged: handled in event loop (side effect)
         // Redraw: no state change needed
         Message::TocCollapse
         | Message::TocExpand
         | Message::FileChanged
-        | Message::ForceReload
         | Message::Redraw
         | Message::EditorSave => {}
 

@@ -117,8 +117,11 @@ pub struct Model {
     pub(super) original_images: HashMap<String, DynamicImage>,
     /// Fetched remote images for the viewed file (survive reloads; dropped on file change)
     remote_images: HashMap<String, DynamicImage>,
-    /// Remote image URLs requested and not dropped; failed ones are never requested again
+    /// Remote image URLs requested and not dropped; failed ones are not requested
+    /// again until a user `ForceReload`
     requested_remote_images: HashSet<String>,
+    /// Remote image URLs whose fetch failed (placeholder reads `[Image failed: alt]`)
+    failed_remote_images: HashSet<String>,
     /// Remote image URLs waiting to be fetched by the event loop
     remote_image_requests: Vec<String>,
     /// Image picker for terminal rendering
@@ -228,6 +231,7 @@ impl Model {
             original_images: HashMap::new(),
             remote_images: HashMap::new(),
             requested_remote_images: HashSet::new(),
+            failed_remote_images: HashSet::new(),
             remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: terminal_size.0,
@@ -311,7 +315,27 @@ impl Model {
                 );
                 self.remote_images.insert(src, img);
             }
-            Err(e) => crate::perf::log_event("image.remote.error", format!("src={src} err={e}")),
+            Err(e) => {
+                crate::perf::log_event("image.remote.error", format!("src={src} err={e:#}"));
+                self.show_toast(
+                    ToastLevel::Warning,
+                    format!(
+                        "Remote image failed: {} ({})",
+                        crate::image::remote::host_of(&src),
+                        crate::image::remote::failure_reason(&e)
+                    ),
+                );
+                self.failed_remote_images.insert(src);
+                self.reparse_document();
+            }
+        }
+    }
+
+    /// Forget failed remote images so the next [`Model::load_nearby_images`]
+    /// requests them again. Called on a user `ForceReload`.
+    pub(super) fn forget_failed_remote_images(&mut self) {
+        for url in self.failed_remote_images.drain() {
+            self.requested_remote_images.remove(&url);
         }
     }
 
@@ -691,6 +715,7 @@ impl Model {
                 math_as_images: math,
                 failed_math_srcs: &self.failed_math_srcs,
                 no_inline_math: self.no_inline_math,
+                failed_image_srcs: &self.failed_remote_images,
             },
         ) {
             self.document = document;
@@ -785,6 +810,7 @@ impl Model {
                     math_as_images: self.should_render_math_as_images(),
                     failed_math_srcs: &self.failed_math_srcs,
                     no_inline_math: self.no_inline_math,
+                    failed_image_srcs: &self.failed_remote_images,
                 },
             )
         } else {
@@ -1140,6 +1166,7 @@ impl Default for Model {
             original_images: HashMap::new(),
             remote_images: HashMap::new(),
             requested_remote_images: HashSet::new(),
+            failed_remote_images: HashSet::new(),
             remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: 80,

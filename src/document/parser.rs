@@ -25,6 +25,8 @@ pub struct DiagramRenderOpts<'a> {
     pub failed_math_srcs: &'a HashSet<String>,
     /// Disable inline (Unicode) math, rendering as images instead.
     pub no_inline_math: bool,
+    /// Image srcs that failed to load (placeholder reads `[Image failed: alt]`).
+    pub failed_image_srcs: &'a HashSet<String>,
 }
 
 impl Default for DiagramRenderOpts<'_> {
@@ -35,6 +37,7 @@ impl Default for DiagramRenderOpts<'_> {
             math_as_images: false,
             failed_math_srcs: &EMPTY_HASH_SET,
             no_inline_math: false,
+            failed_image_srcs: &EMPTY_HASH_SET,
         }
     }
 }
@@ -275,6 +278,7 @@ fn parse_with_all_options_internal<S: BuildHasher>(
         math_as_images: opts.math_as_images,
         failed_math_srcs: opts.failed_math_srcs,
         no_inline_math: opts.no_inline_math,
+        failed_image_srcs: opts.failed_image_srcs,
     };
     process_node(root, &mut ctx, 0, None);
 
@@ -338,6 +342,17 @@ struct ParseContext<'h, S: BuildHasher = std::collections::hash_map::RandomState
     math_as_images: bool,
     failed_math_srcs: &'h HashSet<String>,
     no_inline_math: bool,
+    failed_image_srcs: &'h HashSet<String>,
+}
+
+/// Placeholder text for an image that is not drawn.
+fn image_label(alt: &str, src: &str, failed: &HashSet<String>) -> String {
+    let name = if alt.is_empty() { src } else { alt };
+    if failed.contains(src) {
+        format!("[Image failed: {name}]")
+    } else {
+        format!("[Image: {name}]")
+    }
 }
 
 fn process_node<'a, S: BuildHasher>(
@@ -453,7 +468,7 @@ fn process_node<'a, S: BuildHasher>(
                     let height_lines = ctx.image_heights.get(&src).copied().unwrap_or(1).max(1);
                     let has_caption = ctx.image_heights.contains_key(&src) && !alt.is_empty();
                     let start_line = ctx.lines.len();
-                    let label = format!("[Image: {}]", if alt.is_empty() { &src } else { &alt });
+                    let label = image_label(&alt, &src, ctx.failed_image_srcs);
 
                     if has_caption {
                         ctx.lines
@@ -833,7 +848,7 @@ fn process_node<'a, S: BuildHasher>(
             let alt = extract_text(node);
             let src = image.url.clone();
             let line_num = ctx.lines.len();
-            let label = format!("[Image: {}]", if alt.is_empty() { &src } else { &alt });
+            let label = image_label(&alt, &src, ctx.failed_image_srcs);
             let height_lines = ctx.image_heights.get(&src).copied().unwrap_or(1).max(1);
             let has_caption = ctx.image_heights.contains_key(&src) && !alt.is_empty();
 
@@ -2323,7 +2338,7 @@ fn extract_html_attr(tag: &str, attr_name: &str) -> Option<String> {
 /// Emit an image placeholder for an HTML `<img>` tag.
 fn emit_html_image<S: BuildHasher>(ctx: &mut ParseContext<'_, S>, src: &str, alt: &str) {
     let line_num = ctx.lines.len();
-    let label = format!("[Image: {}]", if alt.is_empty() { src } else { alt });
+    let label = image_label(alt, src, ctx.failed_image_srcs);
     let height_lines = ctx.image_heights.get(src).copied().unwrap_or(1).max(1);
     let has_caption = ctx.image_heights.contains_key(src) && !alt.is_empty();
 
