@@ -11,6 +11,10 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DEBUG_LOGGER: LazyLock<Mutex<DebugLogger>> =
     LazyLock::new(|| Mutex::new(DebugLogger::new()));
 
+/// Serializes tests that point the global debug log at a file.
+#[cfg(test)]
+pub(crate) static DEBUG_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug)]
 pub struct Scope {
     name: &'static str,

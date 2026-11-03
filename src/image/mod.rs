@@ -8,6 +8,7 @@
 
 mod loader;
 mod protocol;
+pub mod remote;
 
 pub use loader::{ImageCache, ImageLoader};
 pub use protocol::detect_protocol;

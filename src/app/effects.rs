@@ -2,6 +2,8 @@ use std::io::{Write, stdout};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
@@ -17,7 +19,43 @@ use crate::config::shell_split_tokens;
 use crate::watcher::FileWatcher;
 use base64::Engine;
 
+/// Number of threads fetching remote images at once.
+pub(super) const REMOTE_IMAGE_WORKERS: usize = 4;
+
+/// Result of fetching one remote image, tagged with its URL.
+pub(super) type RemoteImageResult = (String, anyhow::Result<image::DynamicImage>);
+
 impl App {
+    /// Start [`REMOTE_IMAGE_WORKERS`] threads that `fetch` each URL sent on the
+    /// returned sender and send results back on the returned receiver.
+    ///
+    /// Workers exit once the sender is dropped.
+    pub(super) fn spawn_remote_image_fetchers(
+        fetch: impl Fn(&str) -> anyhow::Result<image::DynamicImage> + Send + Sync + 'static,
+    ) -> (Sender<String>, Receiver<RemoteImageResult>) {
+        let (url_tx, url_rx) = mpsc::channel::<String>();
+        let (result_tx, result_rx) = mpsc::channel();
+        let url_rx = Arc::new(Mutex::new(url_rx));
+        let fetch = Arc::new(fetch);
+        for _ in 0..REMOTE_IMAGE_WORKERS {
+            let url_rx = Arc::clone(&url_rx);
+            let result_tx = result_tx.clone();
+            let fetch = Arc::clone(&fetch);
+            std::thread::spawn(move || {
+                loop {
+                    // Hold the lock only to take the next URL, not while fetching.
+                    let next = url_rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                    let Ok(url) = next else { return };
+                    let result = fetch(&url);
+                    if result_tx.send((url, result)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        (url_tx, result_rx)
+    }
+
     pub(super) fn make_file_watcher(path: &std::path::Path) -> notify::Result<FileWatcher> {
         FileWatcher::new(path, Duration::from_millis(200))
     }
@@ -755,5 +793,38 @@ mod tests {
     fn test_osc52_sequence_encodes_text() {
         let seq = osc52_sequence("hi");
         assert_eq!(seq, "\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn test_remote_image_fetchers_bound_concurrency_and_deliver_all() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let (a, p) = (Arc::clone(&active), Arc::clone(&peak));
+        let (tx, rx) = super::App::spawn_remote_image_fetchers(move |_url: &str| {
+            let now = a.fetch_add(1, Ordering::SeqCst) + 1;
+            p.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(30));
+            a.fetch_sub(1, Ordering::SeqCst);
+            Ok(image::DynamicImage::new_rgba8(1, 1))
+        });
+        for i in 0..12 {
+            tx.send(format!("https://example.com/{i}.png")).unwrap();
+        }
+        let mut got: Vec<String> = (0..12)
+            .map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap().0)
+            .collect();
+        got.sort();
+        got.dedup();
+        assert_eq!(got.len(), 12);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= super::REMOTE_IMAGE_WORKERS,
+            "peak concurrency {peak}"
+        );
+        assert!(peak > 1, "fetches should run in parallel, peak {peak}");
     }
 }

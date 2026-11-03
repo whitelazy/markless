@@ -43,6 +43,8 @@ pub struct ConfigFlags {
     pub no_toc: bool,
     pub toc: bool,
     pub no_images: bool,
+    /// Do not fetch remote (http/https) images.
+    pub no_remote_images: bool,
     pub perf: bool,
     pub force_half_cell: bool,
     pub image_mode: Option<ImageMode>,
@@ -68,6 +70,7 @@ impl ConfigFlags {
             no_toc: self.no_toc || other.no_toc,
             toc: self.toc || other.toc,
             no_images: self.no_images || other.no_images,
+            no_remote_images: self.no_remote_images || other.no_remote_images,
             perf: self.perf || other.perf,
             force_half_cell: self.force_half_cell || other.force_half_cell,
             image_mode: other.image_mode.or(self.image_mode),
@@ -198,6 +201,9 @@ pub fn save_config_flags(path: &Path, flags: &ConfigFlags) -> Result<()> {
     if flags.no_images {
         lines.push("--no-images".to_string());
     }
+    if flags.no_remote_images {
+        lines.push("--no-remote-images".to_string());
+    }
     if let Some(theme) = flags.theme {
         let theme_str = match theme {
             ThemeMode::Auto => "auto",
@@ -274,6 +280,8 @@ pub fn parse_flag_tokens(tokens: &[String]) -> ConfigFlags {
             flags.toc = true;
         } else if token == "--no-images" {
             flags.no_images = true;
+        } else if token == "--no-remote-images" {
+            flags.no_remote_images = true;
         } else if token == "--perf" {
             flags.perf = true;
         } else if token == "--force-half-cell" {
@@ -858,6 +866,37 @@ mod tests {
         save_config_flags(&path, &flags).unwrap();
         let loaded = load_config_flags(&path).unwrap();
         assert!(loaded.no_inline_math);
+    }
+
+    #[test]
+    fn test_parse_flag_tokens_no_remote_images() {
+        let args = vec!["--no-remote-images".to_string()];
+        let flags = parse_flag_tokens(&args);
+        assert!(flags.no_remote_images);
+        assert!(!flags.no_images);
+    }
+
+    #[test]
+    fn test_config_union_no_remote_images() {
+        let file = ConfigFlags {
+            no_remote_images: true,
+            ..ConfigFlags::default()
+        };
+        let merged = file.union(&ConfigFlags::default());
+        assert!(merged.no_remote_images);
+    }
+
+    #[test]
+    fn test_save_load_no_remote_images() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".marklessrc");
+        let flags = ConfigFlags {
+            no_remote_images: true,
+            ..ConfigFlags::default()
+        };
+        save_config_flags(&path, &flags).unwrap();
+        let loaded = load_config_flags(&path).unwrap();
+        assert!(loaded.no_remote_images);
     }
 
     #[test]

@@ -3876,3 +3876,276 @@ fn test_enter_browse_mode_twice_closes_browser() {
     assert!(!model.toc_visible);
     assert!(!model.toc_focused);
 }
+
+const REMOTE_PNG: &str = "https://example.com/tux.png";
+
+fn remote_image_model() -> Model {
+    let md = format!("# Title\n\n![Tux]({REMOTE_PNG})\n");
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    Model::new(PathBuf::from("test.md"), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()))
+}
+
+#[test]
+fn test_load_nearby_images_remote_image_requested_once() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    assert_eq!(
+        model.take_remote_image_requests(),
+        vec![REMOTE_PNG.to_string()]
+    );
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+
+    // Scrolling calls load_nearby_images again; no second request.
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_deliver_remote_image_makes_src_drawable() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.load_nearby_images();
+
+    assert!(model.image_protocols.contains_key(REMOTE_PNG));
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_load_nearby_images_local_image_loads_without_remote_request() {
+    let dir = tempdir().unwrap();
+    image::DynamicImage::new_rgba8(40, 20)
+        .save(dir.path().join("local.png"))
+        .unwrap();
+    let doc = Document::parse_with_layout("![Local](local.png)\n", 80).unwrap();
+    let mut model = Model::new(dir.path().join("test.md"), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+
+    model.load_nearby_images();
+
+    assert!(model.image_protocols.contains_key("local.png"));
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_load_nearby_images_remote_images_disabled_no_request() {
+    let mut model = remote_image_model();
+    model.remote_images_enabled = false;
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+#[test]
+fn test_load_nearby_images_images_disabled_no_remote_request() {
+    let mut model = remote_image_model();
+    model.images_enabled = false;
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_deliver_remote_image_failure_keeps_placeholder_and_never_rerequests() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("timed out")));
+    model.load_nearby_images();
+    model.load_nearby_images();
+
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+#[test]
+fn test_file_changed_does_not_rerequest_fetched_or_failed_remote_images() {
+    const FAILED_PNG: &str = "https://example.com/broken.png";
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    let md = format!("![Tux]({REMOTE_PNG})\n\n![Broken]({FAILED_PNG})\n");
+    std::fs::write(&file_path, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model = Model::new(file_path.clone(), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    assert_eq!(model.take_remote_image_requests().len(), 2);
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.deliver_remote_image(FAILED_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    std::fs::write(&file_path, format!("# Edited\n\n{md}")).unwrap();
+    let mut watcher = None;
+    let mut model = update(model, Message::FileChanged);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::FileChanged);
+    model.load_nearby_images();
+
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(model.image_protocols.contains_key(REMOTE_PNG));
+    assert!(!model.image_protocols.contains_key(FAILED_PNG));
+}
+
+#[test]
+fn test_deliver_remote_image_failure_writes_reason_to_debug_log() {
+    let _guard = crate::perf::DEBUG_LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let log = tempfile::NamedTempFile::new().unwrap();
+    crate::perf::set_debug_log_path(Some(log.path())).unwrap();
+    let mut model = remote_image_model();
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Err(anyhow::anyhow!("response body too large")),
+    );
+    crate::perf::set_debug_log_path(None).unwrap();
+
+    let content = std::fs::read_to_string(log.path()).unwrap();
+    assert!(
+        content.contains(REMOTE_PNG) && content.contains("response body too large"),
+        "debug log should name the URL and reason: {content}"
+    );
+}
+
+#[test]
+fn test_load_file_other_path_drops_fetched_remote_images_keeps_failed() {
+    const FAILED_PNG: &str = "https://example.com/broken.png";
+    let dir = tempdir().unwrap();
+    let md = format!("![Tux]({REMOTE_PNG})\n\n![Broken]({FAILED_PNG})\n");
+    let a = dir.path().join("a.md");
+    let b = dir.path().join("b.md");
+    std::fs::write(&a, &md).unwrap();
+    std::fs::write(&b, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model =
+        Model::new(a, doc, (80, 24)).with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    assert_eq!(model.take_remote_image_requests().len(), 2);
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.deliver_remote_image(FAILED_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    model.load_file(&b).unwrap();
+    model.load_nearby_images();
+
+    // The decoded image was dropped, so it is fetched again; the failure is remembered.
+    assert_eq!(
+        model.take_remote_image_requests(),
+        vec![REMOTE_PNG.to_string()]
+    );
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+fn has_line(model: &Model, text: &str) -> bool {
+    model
+        .document
+        .visible_lines(0, model.document.line_count())
+        .iter()
+        .any(|l| l.content().contains(text))
+}
+
+#[test]
+fn test_deliver_remote_image_failure_shows_toast_and_failed_placeholder() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("boom")));
+
+    assert!(has_line(&model, "[Image failed: Tux]"));
+    let (msg, level) = model.active_toast().unwrap();
+    assert_eq!(level, ToastLevel::Warning);
+    assert!(
+        msg.starts_with("Remote image failed: example.com ("),
+        "{msg}"
+    );
+}
+
+#[test]
+fn test_remote_image_loading_or_disabled_keeps_plain_placeholder() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    assert!(has_line(&model, "[Image: Tux]"));
+    assert!(!has_line(&model, "[Image failed:"));
+
+    let mut model = remote_image_model();
+    model.remote_images_enabled = false;
+    model.load_nearby_images();
+    assert!(has_line(&model, "[Image: Tux]"));
+}
+
+#[test]
+fn test_force_reload_rerequests_failed_remote_images_only() {
+    const FAILED_PNG: &str = "https://example.com/broken.png";
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    let md = format!("![Tux]({REMOTE_PNG})\n\n![Broken]({FAILED_PNG})\n");
+    std::fs::write(&file_path, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model = Model::new(file_path, doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    assert_eq!(model.take_remote_image_requests().len(), 2);
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.deliver_remote_image(FAILED_PNG.to_string(), Err(anyhow::anyhow!("404")));
+    assert!(has_line(&model, "[Image failed: Broken]"));
+
+    let mut watcher = None;
+    let mut model = update(model, Message::ForceReload);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::ForceReload);
+    model.load_nearby_images();
+
+    assert_eq!(
+        model.take_remote_image_requests(),
+        vec![FAILED_PNG.to_string()]
+    );
+    assert!(has_line(&model, "[Image: Broken]"));
+    assert!(model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+#[test]
+fn test_file_changed_keeps_failed_remote_image_placeholder() {
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    let md = format!("![Tux]({REMOTE_PNG})\n");
+    std::fs::write(&file_path, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model = Model::new(file_path.clone(), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    std::fs::write(&file_path, format!("# Edited\n\n{md}")).unwrap();
+    let mut watcher = None;
+    let mut model = update(model, Message::FileChanged);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::FileChanged);
+    model.load_nearby_images();
+
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(has_line(&model, "[Image failed: Tux]"));
+}
+
+#[test]
+fn test_deliver_remote_image_failure_for_other_file_leaves_plain_text_unparsed() {
+    // A late failure from a previously viewed file must not reparse the
+    // current plain-text document as markdown.
+    let doc = Document::from_plain_text("**not bold**");
+    let mut model = Model::new(PathBuf::from("notes.txt"), doc, (80, 24));
+
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    assert!(has_line(&model, "**not bold**"));
+}

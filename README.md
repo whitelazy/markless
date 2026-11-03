@@ -66,6 +66,7 @@ When given a directory, markless opens in browse mode: the sidebar shows the fil
 - `--no-toc`  Hide the table of contents sidebar
 - `--toc`  Start with TOC visible
 - `--no-images`  Disable inline image rendering (show placeholders only)
+- `--no-remote-images`  Do not fetch remote (http/https) images (show placeholders instead)
 - `--image-mode <kitty|sixel|iterm2|halfblock>`  Force a specific image rendering protocol
 - `--force-half-cell`  Force half-cell image rendering (shortcut for `--image-mode halfblock`)
 - `--wrap-width <COLS>`  Maximum content width for word-wrapping

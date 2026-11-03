@@ -115,6 +115,15 @@ pub struct Model {
     pub image_protocols: HashMap<String, (StatefulProtocol, u16, u16)>,
     /// Cache of original images (before scaling) for fast resize
     pub(super) original_images: HashMap<String, DynamicImage>,
+    /// Fetched remote images for the viewed file (survive reloads; dropped on file change)
+    remote_images: HashMap<String, DynamicImage>,
+    /// Remote image URLs requested and not dropped; failed ones are not requested
+    /// again until a user `ForceReload`
+    requested_remote_images: HashSet<String>,
+    /// Remote image URLs whose fetch failed (placeholder reads `[Image failed: alt]`)
+    failed_remote_images: HashSet<String>,
+    /// Remote image URLs waiting to be fetched by the event loop
+    remote_image_requests: Vec<String>,
     /// Image picker for terminal rendering
     pub picker: Option<Picker>,
     /// Viewport width used when images were last scaled (for detecting resize)
@@ -131,6 +140,8 @@ pub struct Model {
     pub selection: Option<LineSelection>,
     /// Whether inline images are enabled
     pub images_enabled: bool,
+    /// Whether remote images are fetched (`--no-remote-images` turns this off)
+    pub remote_images_enabled: bool,
     /// Optional maximum content wrap width in columns
     pub wrap_width: Option<u16>,
     /// Whether directory browse mode is active
@@ -218,6 +229,10 @@ impl Model {
             toc_focused: false,
             image_protocols: HashMap::new(),
             original_images: HashMap::new(),
+            remote_images: HashMap::new(),
+            requested_remote_images: HashSet::new(),
+            failed_remote_images: HashSet::new(),
+            remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: terminal_size.0,
             image_layout_heights: HashMap::new(),
@@ -226,6 +241,7 @@ impl Model {
             image_mode: None,
             selection: None,
             images_enabled: true,
+            remote_images_enabled: true,
             wrap_width: None,
             browse_mode: false,
             browse_dir: base_dir,
@@ -275,6 +291,56 @@ impl Model {
     /// Whether math blocks should be rendered as images.
     pub fn should_render_math_as_images(&self) -> bool {
         self.has_real_image_protocol()
+    }
+
+    /// Take the remote image URLs queued for fetching since the last call.
+    ///
+    /// Each URL is queued at most once per session; the caller fetches
+    /// them off the event loop and hands results to
+    /// [`Model::deliver_remote_image`].
+    pub fn take_remote_image_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.remote_image_requests)
+    }
+
+    /// Accept the result of fetching a remote image.
+    ///
+    /// On success the image is cached for the session; the next
+    /// [`Model::load_nearby_images`] builds its protocol so it can be drawn.
+    pub fn deliver_remote_image(&mut self, src: String, result: Result<DynamicImage>) {
+        match result {
+            Ok(img) => {
+                crate::perf::log_event(
+                    "image.remote.loaded",
+                    format!("src={src} size={}x{}", img.width(), img.height()),
+                );
+                self.remote_images.insert(src, img);
+            }
+            Err(e) => {
+                crate::perf::log_event("image.remote.error", format!("src={src} err={e:#}"));
+                self.show_toast(
+                    ToastLevel::Warning,
+                    format!(
+                        "Remote image failed: {} ({})",
+                        crate::image::remote::host_of(&src),
+                        crate::image::remote::failure_reason(&e)
+                    ),
+                );
+                // A late result may belong to a file viewed earlier; only redraw ours.
+                let in_document = self.document.images().iter().any(|i| i.src == src);
+                self.failed_remote_images.insert(src);
+                if in_document {
+                    self.reflow_layout();
+                }
+            }
+        }
+    }
+
+    /// Forget failed remote images so the next [`Model::load_nearby_images`]
+    /// requests them again. Called on a user `ForceReload`.
+    pub(super) fn forget_failed_remote_images(&mut self) {
+        for url in self.failed_remote_images.drain() {
+            self.requested_remote_images.remove(&url);
+        }
     }
 
     /// Load images that are near the viewport (lazy loading with lookahead).
@@ -393,6 +459,18 @@ impl Model {
                                 }
                             }
                         } else {
+                            None
+                        }
+                    } else if crate::image::remote::is_remote_image(&src) {
+                        if !self.remote_images_enabled {
+                            None
+                        } else if let Some(img) = self.remote_images.get(&src) {
+                            // remote_images is the cache for these; no copy in original_images.
+                            Some(img.clone())
+                        } else {
+                            if self.requested_remote_images.insert(src.clone()) {
+                                self.remote_image_requests.push(src.clone());
+                            }
                             None
                         }
                     } else if let Some(img) = loader.load_sync(&src) {
@@ -641,6 +719,7 @@ impl Model {
                 math_as_images: math,
                 failed_math_srcs: &self.failed_math_srcs,
                 no_inline_math: self.no_inline_math,
+                failed_image_srcs: &self.failed_remote_images,
             },
         ) {
             self.document = document;
@@ -735,6 +814,7 @@ impl Model {
                     math_as_images: self.should_render_math_as_images(),
                     failed_math_srcs: &self.failed_math_srcs,
                     no_inline_math: self.no_inline_math,
+                    failed_image_srcs: &self.failed_remote_images,
                 },
             )
         } else {
@@ -751,6 +831,13 @@ impl Model {
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
         let raw_bytes = std::fs::read(path)?;
         let document = self.document_from_bytes(path, raw_bytes)?;
+        if self.file_path != path {
+            // Drop decoded remote images; forget them as requested so they can be
+            // fetched again. Failed URLs stay in the requested set (never retried).
+            for (url, _) in self.remote_images.drain() {
+                self.requested_remote_images.remove(&url);
+            }
+        }
         self.file_path = path.to_path_buf();
         self.base_dir = path
             .parent()
@@ -1081,6 +1168,10 @@ impl Default for Model {
             toc_focused: false,
             image_protocols: HashMap::new(),
             original_images: HashMap::new(),
+            remote_images: HashMap::new(),
+            requested_remote_images: HashSet::new(),
+            failed_remote_images: HashSet::new(),
+            remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: 80,
             image_layout_heights: HashMap::new(),
@@ -1089,6 +1180,7 @@ impl Default for Model {
             image_mode: None,
             selection: None,
             images_enabled: true,
+            remote_images_enabled: true,
             wrap_width: None,
             browse_mode: false,
             browse_dir: PathBuf::from("."),

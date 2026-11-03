@@ -174,6 +174,7 @@ impl App {
         model.toc_visible = toc_visible;
         model.image_mode = self.image_mode;
         model.images_enabled = self.images_enabled;
+        model.remote_images_enabled = self.remote_images_enabled;
         model.wrap_width = self.wrap_width;
         model.no_inline_math = self.no_inline_math;
         model.external_editor.clone_from(&self.editor);
@@ -305,8 +306,23 @@ impl App {
         let mut frame_idx: u64 = 0;
         let mut needs_render = true;
         let mut mouse_capture_enabled = false;
+        let (remote_tx, remote_rx) = Self::spawn_remote_image_fetchers(|url| {
+            crate::image::remote::fetch_remote_image(
+                url,
+                crate::image::remote::REMOTE_IMAGE_TIMEOUTS,
+            )
+        });
 
         loop {
+            // Fetch remote images off the event loop; results come back over the channel.
+            for url in model.take_remote_image_requests() {
+                let _ = remote_tx.send(url);
+            }
+            while let Ok((url, result)) = remote_rx.try_recv() {
+                model.deliver_remote_image(url, result);
+                needs_render = true;
+            }
+
             // Recreate watcher if the viewed file changed (e.g. browse mode navigation)
             if model.watch_enabled && model.file_path != watched_path {
                 match Self::make_file_watcher(&model.file_path) {

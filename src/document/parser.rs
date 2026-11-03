@@ -25,6 +25,8 @@ pub struct DiagramRenderOpts<'a> {
     pub failed_math_srcs: &'a HashSet<String>,
     /// Disable inline (Unicode) math, rendering as images instead.
     pub no_inline_math: bool,
+    /// Image srcs that failed to load (placeholder reads `[Image failed: alt]`).
+    pub failed_image_srcs: &'a HashSet<String>,
 }
 
 impl Default for DiagramRenderOpts<'_> {
@@ -35,6 +37,7 @@ impl Default for DiagramRenderOpts<'_> {
             math_as_images: false,
             failed_math_srcs: &EMPTY_HASH_SET,
             no_inline_math: false,
+            failed_image_srcs: &EMPTY_HASH_SET,
         }
     }
 }
@@ -275,6 +278,7 @@ fn parse_with_all_options_internal<S: BuildHasher>(
         math_as_images: opts.math_as_images,
         failed_math_srcs: opts.failed_math_srcs,
         no_inline_math: opts.no_inline_math,
+        failed_image_srcs: opts.failed_image_srcs,
     };
     process_node(root, &mut ctx, 0, None);
 
@@ -338,6 +342,17 @@ struct ParseContext<'h, S: BuildHasher = std::collections::hash_map::RandomState
     math_as_images: bool,
     failed_math_srcs: &'h HashSet<String>,
     no_inline_math: bool,
+    failed_image_srcs: &'h HashSet<String>,
+}
+
+/// Placeholder text for an image that is not drawn.
+fn image_label(alt: &str, src: &str, failed: &HashSet<String>) -> String {
+    let name = if alt.is_empty() { src } else { alt };
+    if failed.contains(src) {
+        format!("[Image failed: {name}]")
+    } else {
+        format!("[Image: {name}]")
+    }
 }
 
 fn process_node<'a, S: BuildHasher>(
@@ -455,6 +470,7 @@ fn process_node<'a, S: BuildHasher>(
                         &mut ctx.link_refs,
                         &mut ctx.images,
                         ctx.image_heights,
+                        ctx.failed_image_srcs,
                         &alt,
                         &src,
                     );
@@ -687,6 +703,7 @@ fn process_node<'a, S: BuildHasher>(
                                     &mut ctx.link_refs,
                                     &mut ctx.images,
                                     ctx.image_heights,
+                                    ctx.failed_image_srcs,
                                     alt,
                                     src,
                                 );
@@ -725,6 +742,7 @@ fn process_node<'a, S: BuildHasher>(
                                     &mut ctx.link_refs,
                                     &mut ctx.images,
                                     ctx.image_heights,
+                                    ctx.failed_image_srcs,
                                     alt,
                                     src,
                                 );
@@ -770,6 +788,7 @@ fn process_node<'a, S: BuildHasher>(
                 &mut ctx.link_refs,
                 &mut ctx.images,
                 ctx.image_heights,
+                ctx.failed_image_srcs,
                 ctx.wrap_width,
                 1,
             );
@@ -837,7 +856,7 @@ fn process_node<'a, S: BuildHasher>(
             let alt = extract_text(node);
             let src = image.url.clone();
             let line_num = ctx.lines.len();
-            let label = format!("[Image: {}]", if alt.is_empty() { &src } else { &alt });
+            let label = image_label(&alt, &src, ctx.failed_image_srcs);
             let height_lines = ctx.image_heights.get(&src).copied().unwrap_or(1).max(1);
             let has_caption = ctx.image_heights.contains_key(&src) && !alt.is_empty();
 
@@ -1258,12 +1277,15 @@ fn ensure_trailing_empty_lines(lines: &mut Vec<RenderedLine>, count: usize) {
     }
 }
 
+// shortcut: one arg over clippy's limit after threading failed image srcs; group image params into a struct if another is added.
+#[allow(clippy::too_many_arguments)]
 fn render_blockquote<'a, S: BuildHasher>(
     node: &'a AstNode<'a>,
     lines: &mut Vec<RenderedLine>,
     link_refs: &mut Vec<LinkRef>,
     images: &mut Vec<ImageRef>,
     image_heights: &HashMap<String, usize, S>,
+    failed_image_srcs: &HashSet<String>,
     wrap_width: usize,
     quote_depth: usize,
 ) {
@@ -1275,7 +1297,15 @@ fn render_blockquote<'a, S: BuildHasher>(
                 let child_images = collect_paragraph_images(child);
                 if !child_images.is_empty() && is_image_only_paragraph(child) {
                     for (alt, src) in &child_images {
-                        emit_image_block(lines, link_refs, images, image_heights, alt, src);
+                        emit_image_block(
+                            lines,
+                            link_refs,
+                            images,
+                            image_heights,
+                            failed_image_srcs,
+                            alt,
+                            src,
+                        );
                     }
                     continue;
                 }
@@ -1303,7 +1333,15 @@ fn render_blockquote<'a, S: BuildHasher>(
                 );
                 link_refs.extend(extra);
                 for (alt, src) in &child_images {
-                    emit_image_block(lines, link_refs, images, image_heights, alt, src);
+                    emit_image_block(
+                        lines,
+                        link_refs,
+                        images,
+                        image_heights,
+                        failed_image_srcs,
+                        alt,
+                        src,
+                    );
                 }
             }
             NodeValue::BlockQuote => {
@@ -1313,6 +1351,7 @@ fn render_blockquote<'a, S: BuildHasher>(
                     link_refs,
                     images,
                     image_heights,
+                    failed_image_srcs,
                     wrap_width,
                     quote_depth + 1,
                 );
@@ -2102,13 +2141,14 @@ fn emit_image_block<S: BuildHasher>(
     link_refs: &mut Vec<LinkRef>,
     images: &mut Vec<ImageRef>,
     image_heights: &HashMap<String, usize, S>,
+    failed_image_srcs: &HashSet<String>,
     alt: &str,
     src: &str,
 ) {
     let height_lines = image_heights.get(src).copied().unwrap_or(1).max(1);
     let has_caption = image_heights.contains_key(src) && !alt.is_empty();
     let start_line = lines.len();
-    let label = format!("[Image: {}]", if alt.is_empty() { src } else { alt });
+    let label = image_label(alt, src, failed_image_srcs);
 
     if has_caption {
         lines.push(RenderedLine::new(format!("    {alt}"), LineType::Image));
@@ -2405,7 +2445,7 @@ fn extract_html_attr(tag: &str, attr_name: &str) -> Option<String> {
 /// Emit an image placeholder for an HTML `<img>` tag.
 fn emit_html_image<S: BuildHasher>(ctx: &mut ParseContext<'_, S>, src: &str, alt: &str) {
     let line_num = ctx.lines.len();
-    let label = format!("[Image: {}]", if alt.is_empty() { src } else { alt });
+    let label = image_label(alt, src, ctx.failed_image_srcs);
     let height_lines = ctx.image_heights.get(src).copied().unwrap_or(1).max(1);
     let has_caption = ctx.image_heights.contains_key(src) && !alt.is_empty();
 
@@ -2439,6 +2479,31 @@ fn emit_html_image<S: BuildHasher>(ctx: &mut ParseContext<'_, S>, src: &str, alt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_failed_image_in_list_and_quote_shows_failed_marker() {
+        let url = "https://example.com/x.png";
+        let md = format!("- item\n\n  ![InList]({url})\n\n> ![InQuote]({url})\n");
+        let failed: HashSet<String> = [url.to_string()].into_iter().collect();
+        let opts = DiagramRenderOpts {
+            failed_image_srcs: &failed,
+            ..DiagramRenderOpts::default()
+        };
+        let doc =
+            Document::parse_with_all_options_and_failures(&md, 80, &HashMap::new(), &opts).unwrap();
+        let text: Vec<&str> = doc
+            .visible_lines(0, doc.line_count())
+            .iter()
+            .map(|l| l.content())
+            .collect();
+        for alt in ["InList", "InQuote"] {
+            assert!(
+                text.iter()
+                    .any(|l| l.contains(&format!("[Image failed: {alt}]"))),
+                "{alt} should show failed marker, got: {text:#?}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_empty_document() {
