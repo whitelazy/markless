@@ -11,6 +11,10 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static DEBUG_LOGGER: LazyLock<Mutex<DebugLogger>> =
     LazyLock::new(|| Mutex::new(DebugLogger::new()));
 
+/// Serializes tests that point the global debug log at a file.
+#[cfg(test)]
+pub(crate) static DEBUG_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug)]
 pub struct Scope {
     name: &'static str,
@@ -127,6 +131,9 @@ mod tests {
 
     #[test]
     fn test_debug_log_path_enables_logging_and_writes() {
+        let _guard = DEBUG_LOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_file = NamedTempFile::new().unwrap();
         set_debug_log_path(Some(temp_file.path())).unwrap();
         assert!(is_debug_log_enabled());

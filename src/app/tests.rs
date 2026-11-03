@@ -3903,3 +3903,67 @@ fn test_load_nearby_images_local_image_loads_without_remote_request() {
     assert!(model.image_protocols.contains_key("local.png"));
     assert!(model.take_remote_image_requests().is_empty());
 }
+
+#[test]
+fn test_deliver_remote_image_failure_keeps_placeholder_and_never_rerequests() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+
+    model.deliver_remote_image(REMOTE_PNG.to_string(), Err(anyhow::anyhow!("timed out")));
+    model.load_nearby_images();
+    model.load_nearby_images();
+
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+#[test]
+fn test_file_changed_does_not_rerequest_fetched_or_failed_remote_images() {
+    const FAILED_PNG: &str = "https://example.com/broken.png";
+    let dir = tempdir().unwrap();
+    let file_path = dir.path().join("test.md");
+    let md = format!("![Tux]({REMOTE_PNG})\n\n![Broken]({FAILED_PNG})\n");
+    std::fs::write(&file_path, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model = Model::new(file_path.clone(), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    assert_eq!(model.take_remote_image_requests().len(), 2);
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.deliver_remote_image(FAILED_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    std::fs::write(&file_path, format!("# Edited\n\n{md}")).unwrap();
+    let mut watcher = None;
+    let mut model = update(model, Message::FileChanged);
+    App::handle_message_side_effects(&mut model, &mut watcher, &Message::FileChanged);
+    model.load_nearby_images();
+
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(model.image_protocols.contains_key(REMOTE_PNG));
+    assert!(!model.image_protocols.contains_key(FAILED_PNG));
+}
+
+#[test]
+fn test_deliver_remote_image_failure_writes_reason_to_debug_log() {
+    let _guard = crate::perf::DEBUG_LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let log = tempfile::NamedTempFile::new().unwrap();
+    crate::perf::set_debug_log_path(Some(log.path())).unwrap();
+    let mut model = remote_image_model();
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Err(anyhow::anyhow!("response body too large")),
+    );
+    crate::perf::set_debug_log_path(None).unwrap();
+
+    let content = std::fs::read_to_string(log.path()).unwrap();
+    assert!(
+        content.contains(REMOTE_PNG) && content.contains("response body too large"),
+        "debug log should name the URL and reason: {content}"
+    );
+}

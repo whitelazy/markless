@@ -35,7 +35,8 @@ pub fn fetch_remote_image(url: &str, timeout: Duration) -> Result<DynamicImage> 
         .call()?
         .body_mut()
         .with_config()
-        .limit(MAX_BODY_BYTES)
+        // ureq rejects a body whose size equals the limit; allow exactly 20MB.
+        .limit(MAX_BODY_BYTES + 1)
         .read_to_vec()?;
     Ok(image::load_from_memory(&bytes)?)
 }
@@ -70,6 +71,102 @@ mod tests {
             stream.write_all(&body).unwrap();
         });
         format!("http://{addr}/tux.png")
+    }
+
+    /// Serve every connection with `respond(path)` (raw HTTP response bytes).
+    fn serve_with(respond: impl Fn(&str) -> Vec<u8> + Send + 'static) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut req = [0_u8; 1024];
+                let n = stream.read(&mut req).unwrap_or(0);
+                let req = String::from_utf8_lossy(&req[..n]).to_string();
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                // Client may hang up early (limits); ignore write errors.
+                let _ = stream.write_all(&respond(&path));
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn response(content_type: &str, body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// `/r/N` redirects to `/r/N-1`; `/r/0` serves a PNG.
+    fn redirect_chain_url(hops: usize) -> String {
+        let base = serve_with(|path| {
+            let n: usize = path.trim_start_matches("/r/").parse().unwrap_or(0);
+            if n == 0 {
+                response("image/png", &png_bytes())
+            } else {
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: /r/{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    n - 1
+                )
+                .into_bytes()
+            }
+        });
+        format!("{base}/r/{hops}")
+    }
+
+    #[test]
+    fn test_fetch_remote_image_body_over_20mb_fails() {
+        // A valid PNG padded past 20MB: only the size limit can reject it.
+        let mut big = png_bytes();
+        big.resize(20 * 1024 * 1024 + 1, 0);
+        let base = serve_with(move |_| response("image/png", &big));
+        assert!(fetch_remote_image(&format!("{base}/big.png"), Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn test_fetch_remote_image_body_at_20mb_decodes() {
+        let mut big = png_bytes();
+        big.resize(20 * 1024 * 1024, 0);
+        let base = serve_with(move |_| response("image/png", &big));
+        fetch_remote_image(&format!("{base}/big.png"), Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn test_fetch_remote_image_non_image_body_fails() {
+        let base = serve_with(|_| response("text/html", b"<html>not an image</html>"));
+        assert!(fetch_remote_image(&format!("{base}/page"), Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn test_fetch_remote_image_slow_server_times_out() {
+        let base = serve_with(|_| {
+            std::thread::sleep(Duration::from_secs(3));
+            response("image/png", &png_bytes())
+        });
+        let start = std::time::Instant::now();
+        let result = fetch_remote_image(&format!("{base}/slow.png"), Duration::from_millis(200));
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_fetch_remote_image_five_redirects_succeeds() {
+        assert!(fetch_remote_image(&redirect_chain_url(5), Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn test_fetch_remote_image_six_redirects_fails() {
+        assert!(fetch_remote_image(&redirect_chain_url(6), Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn test_fetch_remote_image_non_http_scheme_fails() {
+        assert!(fetch_remote_image("ftp://127.0.0.1/a.png", Duration::from_secs(1)).is_err());
+        assert!(fetch_remote_image("file:///etc/hosts", Duration::from_secs(1)).is_err());
     }
 
     #[test]
