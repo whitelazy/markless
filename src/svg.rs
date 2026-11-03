@@ -32,6 +32,21 @@ fn cached_fontdb() -> &'static Arc<fontdb::Database> {
 /// Returns an error if the SVG cannot be parsed or the resulting
 /// pixmap dimensions are zero.
 pub fn rasterize_svg(svg: &str, target_width_px: u32) -> Result<DynamicImage> {
+    rasterize(svg, Some(target_width_px))
+}
+
+/// Rasterize an SVG string at its intrinsic size (its `width`/`height`
+/// or `viewBox`).
+///
+/// # Errors
+///
+/// Returns an error if the SVG cannot be parsed or the resulting
+/// pixmap dimensions are zero.
+pub fn rasterize_svg_intrinsic(svg: &str) -> Result<DynamicImage> {
+    rasterize(svg, None)
+}
+
+fn rasterize(svg: &str, target_width_px: Option<u32>) -> Result<DynamicImage> {
     let opts = resvg::usvg::Options {
         fontdb: Arc::clone(cached_fontdb()),
         ..Default::default()
@@ -40,7 +55,7 @@ pub fn rasterize_svg(svg: &str, target_width_px: u32) -> Result<DynamicImage> {
     let tree = resvg::usvg::Tree::from_str(svg, &opts)?;
     let size = tree.size();
 
-    let scale = f64::from(target_width_px) / f64::from(size.width());
+    let scale = target_width_px.map_or(1.0, |w| f64::from(w) / f64::from(size.width()));
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width = (f64::from(size.width()) * scale).ceil() as u32;

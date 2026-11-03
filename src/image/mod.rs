@@ -130,7 +130,21 @@ pub fn load_image(base_path: &Path, image_path: &str) -> Option<DynamicImage> {
         base_path.join(image_path)
     };
 
-    image::open(&full_path).ok()
+    open_image(&full_path)
+}
+
+/// Decode an image file. SVG files are rasterized at their intrinsic size,
+/// because the `image` crate has no SVG decoder.
+pub fn open_image(path: &Path) -> Option<DynamicImage> {
+    let is_svg = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+    if is_svg {
+        let svg = std::fs::read_to_string(path).ok()?;
+        return crate::svg::rasterize_svg_intrinsic(&svg).ok();
+    }
+    image::open(path).ok()
 }
 
 /// Whether terminal output should be treated as truecolor-capable.
