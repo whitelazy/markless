@@ -174,6 +174,7 @@ impl App {
         model.toc_visible = toc_visible;
         model.image_mode = self.image_mode;
         model.images_enabled = self.images_enabled;
+        model.remote_images_enabled = self.remote_images_enabled;
         model.wrap_width = self.wrap_width;
         model.no_inline_math = self.no_inline_math;
         model.external_editor.clone_from(&self.editor);

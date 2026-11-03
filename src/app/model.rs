@@ -137,6 +137,8 @@ pub struct Model {
     pub selection: Option<LineSelection>,
     /// Whether inline images are enabled
     pub images_enabled: bool,
+    /// Whether remote images are fetched (`--no-remote-images` turns this off)
+    pub remote_images_enabled: bool,
     /// Optional maximum content wrap width in columns
     pub wrap_width: Option<u16>,
     /// Whether directory browse mode is active
@@ -235,6 +237,7 @@ impl Model {
             image_mode: None,
             selection: None,
             images_enabled: true,
+            remote_images_enabled: true,
             wrap_width: None,
             browse_mode: false,
             browse_dir: base_dir,
@@ -431,7 +434,9 @@ impl Model {
                             None
                         }
                     } else if crate::image::remote::is_remote_image(&src) {
-                        if let Some(img) = self.remote_images.get(&src) {
+                        if !self.remote_images_enabled {
+                            None
+                        } else if let Some(img) = self.remote_images.get(&src) {
                             self.original_images.insert(src.clone(), img.clone());
                             Some(img.clone())
                         } else {
@@ -1137,6 +1142,7 @@ impl Default for Model {
             image_mode: None,
             selection: None,
             images_enabled: true,
+            remote_images_enabled: true,
             wrap_width: None,
             browse_mode: false,
             browse_dir: PathBuf::from("."),
