@@ -26,8 +26,8 @@ ratatui-image = { version = "10", default-features = false, features = ["image-d
 image = "0.25"
 
 # Mermaid diagram rendering
-mermaid-rs-renderer = { version = "0.2", default-features = false }
-resvg = "0.44"
+mermaid-rs-renderer = { version = "0.3", default-features = false }
+resvg = "0.49"
 
 # Math rendering (LaTeX → Unicode / SVG → raster)
 unicodeit = "0.2"

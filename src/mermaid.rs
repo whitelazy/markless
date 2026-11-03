@@ -150,4 +150,44 @@ mod tests {
         assert_eq!(img.width(), 1200);
         assert!(img.height() > 0);
     }
+
+    /// Parse `(x, y, width, height)` from every `<rect ...>` whose tag contains `marker`.
+    fn rects_with(svg: &str, marker: &str) -> Vec<(f32, f32, f32, f32)> {
+        let attr = |tag: &str, name: &str| -> f32 {
+            let key = format!(" {name}=\"");
+            let start = tag.find(&key).unwrap() + key.len();
+            let end = start + tag[start..].find('"').unwrap();
+            tag[start..end].parse().unwrap()
+        };
+        svg.split("<rect")
+            .skip(1)
+            .map(|t| &t[..t.find('>').unwrap()])
+            .filter(|t| t.contains(marker))
+            .map(|t| {
+                (
+                    attr(t, "x"),
+                    attr(t, "y"),
+                    attr(t, "width"),
+                    attr(t, "height"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_render_to_svg_edge_label_skipping_rank_not_hidden_by_node() {
+        // B -> D skips over C; mermaid-rs-renderer 0.2 placed its label inside C, which covered it.
+        let source = "flowchart LR\n    A[시작] --> B{조건}\n    B -->|예| C[처리]\n    B -->|아니오| D[종료]\n    C --> D";
+        let svg = render_to_svg(source).unwrap();
+        let labels = rects_with(&svg, "data-label-kind");
+        let nodes = rects_with(&svg, "rx=\"3\"");
+        assert!(!labels.is_empty() && !nodes.is_empty());
+        for l in &labels {
+            for n in &nodes {
+                let overlap =
+                    l.0 < n.0 + n.2 && n.0 < l.0 + l.2 && l.1 < n.1 + n.3 && n.1 < l.1 + l.3;
+                assert!(!overlap, "edge label {l:?} overlaps node {n:?}");
+            }
+        }
+    }
 }
