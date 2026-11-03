@@ -3984,3 +3984,34 @@ fn test_deliver_remote_image_failure_writes_reason_to_debug_log() {
         "debug log should name the URL and reason: {content}"
     );
 }
+
+#[test]
+fn test_load_file_other_path_drops_fetched_remote_images_keeps_failed() {
+    const FAILED_PNG: &str = "https://example.com/broken.png";
+    let dir = tempdir().unwrap();
+    let md = format!("![Tux]({REMOTE_PNG})\n\n![Broken]({FAILED_PNG})\n");
+    let a = dir.path().join("a.md");
+    let b = dir.path().join("b.md");
+    std::fs::write(&a, &md).unwrap();
+    std::fs::write(&b, &md).unwrap();
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    let mut model =
+        Model::new(a, doc, (80, 24)).with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+    model.load_nearby_images();
+    assert_eq!(model.take_remote_image_requests().len(), 2);
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.deliver_remote_image(FAILED_PNG.to_string(), Err(anyhow::anyhow!("404")));
+
+    model.load_file(&b).unwrap();
+    model.load_nearby_images();
+
+    // The decoded image was dropped, so it is fetched again; the failure is remembered.
+    assert_eq!(
+        model.take_remote_image_requests(),
+        vec![REMOTE_PNG.to_string()]
+    );
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}

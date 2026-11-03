@@ -115,9 +115,9 @@ pub struct Model {
     pub image_protocols: HashMap<String, (StatefulProtocol, u16, u16)>,
     /// Cache of original images (before scaling) for fast resize
     pub(super) original_images: HashMap<String, DynamicImage>,
-    /// Fetched remote images, kept for the whole session (survive file reloads)
+    /// Fetched remote images for the viewed file (survive reloads; dropped on file change)
     remote_images: HashMap<String, DynamicImage>,
-    /// Remote image URLs already requested this session; never requested again
+    /// Remote image URLs requested and not dropped; failed ones are never requested again
     requested_remote_images: HashSet<String>,
     /// Remote image URLs waiting to be fetched by the event loop
     remote_image_requests: Vec<String>,
@@ -437,7 +437,7 @@ impl Model {
                         if !self.remote_images_enabled {
                             None
                         } else if let Some(img) = self.remote_images.get(&src) {
-                            self.original_images.insert(src.clone(), img.clone());
+                            // remote_images is the cache for these; no copy in original_images.
                             Some(img.clone())
                         } else {
                             if self.requested_remote_images.insert(src.clone()) {
@@ -801,6 +801,13 @@ impl Model {
     pub fn load_file(&mut self, path: &Path) -> Result<()> {
         let raw_bytes = std::fs::read(path)?;
         let document = self.document_from_bytes(path, raw_bytes)?;
+        if self.file_path != path {
+            // Drop decoded remote images; forget them as requested so they can be
+            // fetched again. Failed URLs stay in the requested set (never retried).
+            for (url, _) in self.remote_images.drain() {
+                self.requested_remote_images.remove(&url);
+            }
+        }
         self.file_path = path.to_path_buf();
         self.base_dir = path
             .parent()

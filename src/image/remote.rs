@@ -1,5 +1,6 @@
 //! Fetching remote images (http/https URLs).
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -7,8 +8,20 @@ use image::DynamicImage;
 
 /// Return true when `src` is a remote image (an http or https URL).
 pub fn is_remote_image(src: &str) -> bool {
-    src.starts_with("https://") || src.starts_with("http://")
+    let has_scheme = |scheme: &str| {
+        src.get(..scheme.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(scheme))
+    };
+    has_scheme("https://") || has_scheme("http://")
 }
+
+/// One HTTP agent for all fetches, so connections and TLS setup are reused.
+static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::Agent::config_builder()
+        .max_redirects(5)
+        .build()
+        .into()
+});
 
 /// Timeout used for real remote image fetches.
 pub const REMOTE_IMAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,13 +38,11 @@ const MAX_BODY_BYTES: u64 = 20 * 1024 * 1024;
 /// Returns an error on network failure, timeout, non-2xx status, a body
 /// over 20MB, or bytes that do not decode as an image.
 pub fn fetch_remote_image(url: &str, timeout: Duration) -> Result<DynamicImage> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .max_redirects(5)
-        .build()
-        .into();
-    let bytes = agent
+    let bytes = AGENT
         .get(url)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .call()?
         .body_mut()
         .with_config()
@@ -183,5 +194,19 @@ mod tests {
         assert!(!is_remote_image("images/a.png"));
         assert!(!is_remote_image("mermaid://0"));
         assert!(!is_remote_image("file:///tmp/a.png"));
+    }
+
+    #[test]
+    fn test_is_remote_image_scheme_case_insensitive() {
+        assert!(is_remote_image("HTTPS://example.com/a.png"));
+        assert!(is_remote_image("Http://example.com/a.png"));
+        assert!(!is_remote_image("//example.com/a.png"));
+        assert!(!is_remote_image("HTTP:/x"));
+    }
+
+    #[test]
+    fn test_fetch_remote_image_uppercase_scheme_decodes_png() {
+        let url = serve_once(png_bytes()).replacen("http://", "HTTP://", 1);
+        assert!(fetch_remote_image(&url, Duration::from_secs(5)).is_ok());
     }
 }

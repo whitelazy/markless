@@ -306,19 +306,17 @@ impl App {
         let mut frame_idx: u64 = 0;
         let mut needs_render = true;
         let mut mouse_capture_enabled = false;
-        let (remote_tx, remote_rx) = std::sync::mpsc::channel();
+        let (remote_tx, remote_rx) = Self::spawn_remote_image_fetchers(|url| {
+            crate::image::remote::fetch_remote_image(
+                url,
+                crate::image::remote::REMOTE_IMAGE_TIMEOUT,
+            )
+        });
 
         loop {
             // Fetch remote images off the event loop; results come back over the channel.
             for url in model.take_remote_image_requests() {
-                let tx = remote_tx.clone();
-                std::thread::spawn(move || {
-                    let result = crate::image::remote::fetch_remote_image(
-                        &url,
-                        crate::image::remote::REMOTE_IMAGE_TIMEOUT,
-                    );
-                    let _ = tx.send((url, result));
-                });
+                let _ = remote_tx.send(url);
             }
             while let Ok((url, result)) = remote_rx.try_recv() {
                 model.deliver_remote_image(url, result);
