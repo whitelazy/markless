@@ -403,14 +403,9 @@ impl Model {
                     };
 
                 if let Some(img) = original {
-                    // Scale to fit target width, preserving aspect ratio.
-                    // For math images, don't upscale — they're already rendered
-                    // at the right size for their content.
-                    let effective_width = if src.starts_with("math://") {
-                        img.width().min(target_width_px)
-                    } else {
-                        target_width_px
-                    };
+                    // Shrink to fit the target width, preserving aspect ratio.
+                    // Never upscale: small images keep their own size.
+                    let effective_width = img.width().min(target_width_px);
                     let scale = f64::from(effective_width) / f64::from(img.width());
                     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                     // Scaled image height is always positive and well within u32 range.
@@ -430,15 +425,12 @@ impl Model {
                     }
 
                     let protocol = picker.new_resize_protocol(scaled);
-                    // For math, use the image's natural column width so the
-                    // protocol doesn't stretch a small equation to fill the
-                    // full viewport width.
+                    // Use the image's own column width so the protocol doesn't
+                    // stretch a small image to fill the target width.
                     #[allow(clippy::cast_possible_truncation)]
-                    let render_cols = if src.starts_with("math://") {
+                    let render_cols = {
                         let cols = effective_width / u32::from(font_size.0);
                         (cols.max(1) as u16).min(target_width_cols)
-                    } else {
-                        target_width_cols
                     };
                     let (width_cols, height_rows) = protocol_render_size(&protocol, render_cols);
                     self.image_protocols
