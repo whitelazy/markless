@@ -115,6 +115,12 @@ pub struct Model {
     pub image_protocols: HashMap<String, (StatefulProtocol, u16, u16)>,
     /// Cache of original images (before scaling) for fast resize
     pub(super) original_images: HashMap<String, DynamicImage>,
+    /// Fetched remote images, kept for the whole session (survive file reloads)
+    remote_images: HashMap<String, DynamicImage>,
+    /// Remote image URLs already requested this session; never requested again
+    requested_remote_images: HashSet<String>,
+    /// Remote image URLs waiting to be fetched by the event loop
+    remote_image_requests: Vec<String>,
     /// Image picker for terminal rendering
     pub picker: Option<Picker>,
     /// Viewport width used when images were last scaled (for detecting resize)
@@ -218,6 +224,9 @@ impl Model {
             toc_focused: false,
             image_protocols: HashMap::new(),
             original_images: HashMap::new(),
+            remote_images: HashMap::new(),
+            requested_remote_images: HashSet::new(),
+            remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: terminal_size.0,
             image_layout_heights: HashMap::new(),
@@ -275,6 +284,32 @@ impl Model {
     /// Whether math blocks should be rendered as images.
     pub fn should_render_math_as_images(&self) -> bool {
         self.has_real_image_protocol()
+    }
+
+    /// Take the remote image URLs queued for fetching since the last call.
+    ///
+    /// Each URL is queued at most once per session; the caller fetches
+    /// them off the event loop and hands results to
+    /// [`Model::deliver_remote_image`].
+    pub fn take_remote_image_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.remote_image_requests)
+    }
+
+    /// Accept the result of fetching a remote image.
+    ///
+    /// On success the image is cached for the session; the next
+    /// [`Model::load_nearby_images`] builds its protocol so it can be drawn.
+    pub fn deliver_remote_image(&mut self, src: String, result: Result<DynamicImage>) {
+        match result {
+            Ok(img) => {
+                crate::perf::log_event(
+                    "image.remote.loaded",
+                    format!("src={src} size={}x{}", img.width(), img.height()),
+                );
+                self.remote_images.insert(src, img);
+            }
+            Err(e) => crate::perf::log_event("image.remote.error", format!("src={src} err={e}")),
+        }
     }
 
     /// Load images that are near the viewport (lazy loading with lookahead).
@@ -393,6 +428,16 @@ impl Model {
                                 }
                             }
                         } else {
+                            None
+                        }
+                    } else if crate::image::remote::is_remote_image(&src) {
+                        if let Some(img) = self.remote_images.get(&src) {
+                            self.original_images.insert(src.clone(), img.clone());
+                            Some(img.clone())
+                        } else {
+                            if self.requested_remote_images.insert(src.clone()) {
+                                self.remote_image_requests.push(src.clone());
+                            }
                             None
                         }
                     } else if let Some(img) = loader.load_sync(&src) {
@@ -1081,6 +1126,9 @@ impl Default for Model {
             toc_focused: false,
             image_protocols: HashMap::new(),
             original_images: HashMap::new(),
+            remote_images: HashMap::new(),
+            requested_remote_images: HashSet::new(),
+            remote_image_requests: Vec::new(),
             picker: None,
             last_image_scale_width: 80,
             image_layout_heights: HashMap::new(),

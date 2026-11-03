@@ -3847,3 +3847,59 @@ fn test_enter_edit_mode_allowed_for_text_file() {
     let model = update(model, Message::EnterEditMode);
     assert!(model.editor_mode, "should enter edit mode for text files");
 }
+
+const REMOTE_PNG: &str = "https://example.com/tux.png";
+
+fn remote_image_model() -> Model {
+    let md = format!("# Title\n\n![Tux]({REMOTE_PNG})\n");
+    let doc = Document::parse_with_layout(&md, 80).unwrap();
+    Model::new(PathBuf::from("test.md"), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()))
+}
+
+#[test]
+fn test_load_nearby_images_remote_image_requested_once() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    assert_eq!(
+        model.take_remote_image_requests(),
+        vec![REMOTE_PNG.to_string()]
+    );
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+
+    // Scrolling calls load_nearby_images again; no second request.
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_deliver_remote_image_makes_src_drawable() {
+    let mut model = remote_image_model();
+    model.load_nearby_images();
+    let _ = model.take_remote_image_requests();
+
+    model.deliver_remote_image(
+        REMOTE_PNG.to_string(),
+        Ok(image::DynamicImage::new_rgba8(40, 20)),
+    );
+    model.load_nearby_images();
+
+    assert!(model.image_protocols.contains_key(REMOTE_PNG));
+    assert!(model.take_remote_image_requests().is_empty());
+}
+
+#[test]
+fn test_load_nearby_images_local_image_loads_without_remote_request() {
+    let dir = tempdir().unwrap();
+    image::DynamicImage::new_rgba8(40, 20)
+        .save(dir.path().join("local.png"))
+        .unwrap();
+    let doc = Document::parse_with_layout("![Local](local.png)\n", 80).unwrap();
+    let mut model = Model::new(dir.path().join("test.md"), doc, (80, 24))
+        .with_picker(Some(ratatui_image::picker::Picker::halfblocks()));
+
+    model.load_nearby_images();
+
+    assert!(model.image_protocols.contains_key("local.png"));
+    assert!(model.take_remote_image_requests().is_empty());
+}

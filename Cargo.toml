@@ -24,6 +24,8 @@ csv = "1"
 # Image rendering
 ratatui-image = { version = "10", default-features = false, features = ["image-defaults", "crossterm"] }
 image = "0.25"
+# Remote image fetching
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 # Mermaid diagram rendering
 mermaid-rs-renderer = { version = "0.2", default-features = false }
