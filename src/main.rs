@@ -60,6 +60,10 @@ struct Cli {
     #[arg(long)]
     no_images: bool,
 
+    /// Do not fetch remote (http/https) images (show placeholders instead)
+    #[arg(long)]
+    no_remote_images: bool,
+
     /// Force syntax highlight theme background (light or dark)
     #[arg(long, value_enum, default_value = "auto")]
     theme: ThemeMode,
@@ -304,6 +308,7 @@ fn main() -> Result<()> {
         .with_toc_visible(effective.toc && !effective.no_toc)
         .with_image_mode(effective.image_mode)
         .with_images_enabled(!effective.no_images)
+        .with_remote_images_enabled(!effective.no_remote_images)
         .with_browse_mode(is_directory)
         .with_wrap_width(effective.wrap_width)
         .with_no_inline_math(effective.no_inline_math && !effective.inline_math)

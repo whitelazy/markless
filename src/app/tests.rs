@@ -3903,3 +3903,20 @@ fn test_load_nearby_images_local_image_loads_without_remote_request() {
     assert!(model.image_protocols.contains_key("local.png"));
     assert!(model.take_remote_image_requests().is_empty());
 }
+
+#[test]
+fn test_load_nearby_images_remote_images_disabled_no_request() {
+    let mut model = remote_image_model();
+    model.remote_images_enabled = false;
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+    assert!(!model.image_protocols.contains_key(REMOTE_PNG));
+}
+
+#[test]
+fn test_load_nearby_images_images_disabled_no_remote_request() {
+    let mut model = remote_image_model();
+    model.images_enabled = false;
+    model.load_nearby_images();
+    assert!(model.take_remote_image_requests().is_empty());
+}

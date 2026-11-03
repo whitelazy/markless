@@ -27,6 +27,7 @@ pub struct App {
     toc_visible: bool,
     image_mode: Option<ImageMode>,
     images_enabled: bool,
+    remote_images_enabled: bool,
     config_global_path: Option<PathBuf>,
     config_local_path: Option<PathBuf>,
     browse_mode: bool,
@@ -45,6 +46,7 @@ impl App {
             toc_visible: false,
             image_mode: None,
             images_enabled: true,
+            remote_images_enabled: true,
             config_global_path: None,
             config_local_path: None,
             browse_mode: false,
@@ -86,6 +88,13 @@ impl App {
     #[must_use]
     pub const fn with_images_enabled(mut self, enabled: bool) -> Self {
         self.images_enabled = enabled;
+        self
+    }
+
+    /// Enable or disable fetching remote (http/https) images.
+    #[must_use]
+    pub const fn with_remote_images_enabled(mut self, enabled: bool) -> Self {
+        self.remote_images_enabled = enabled;
         self
     }
 
