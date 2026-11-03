@@ -118,7 +118,7 @@ impl ImageLoader {
             return Some(img);
         }
 
-        let img = image::open(&full_path).ok()?;
+        let img = super::open_image(&full_path)?;
         self.cache.insert(full_path, img.clone());
         Some(img)
     }
@@ -126,7 +126,7 @@ impl ImageLoader {
     /// Load an image synchronously (for use in non-async contexts).
     pub fn load_sync(&self, image_path: &str) -> Option<DynamicImage> {
         let full_path = self.resolve_path(image_path);
-        image::open(&full_path).ok()
+        super::open_image(&full_path)
     }
 
     /// Resolve a potentially relative path to an absolute path.
@@ -178,5 +178,17 @@ mod tests {
         let loader = ImageLoader::new(PathBuf::from("/base"));
         let resolved = loader.resolve_path("relative/path.png");
         assert_eq!(resolved, PathBuf::from("/base/relative/path.png"));
+    }
+
+    const SAMPLE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100"><rect width="200" height="100" fill="#4a90d9"/></svg>"##;
+
+    #[test]
+    fn test_loader_load_sync_svg_file_returns_raster_image() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("sample.svg"), SAMPLE_SVG).unwrap();
+        let loader = ImageLoader::new(dir.path().to_path_buf());
+
+        let img = loader.load_sync("sample.svg").expect("svg should load");
+        assert_eq!((img.width(), img.height()), (200, 100));
     }
 }
